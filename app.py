@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import optimizer as opt
+import pipeline
 import stats
 
 st.set_page_config(page_title="Portfolio Optimizer", page_icon="📈", layout="wide")
@@ -105,13 +106,23 @@ def connect() -> sqlite3.Connection:
     return sqlite3.connect(stats.DB_PATH)
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner="Checking for new market data...")
+def refresh_market_data() -> bool:
+    """Run the incremental pipeline at most every 6 hours. Falls back to stored data on failure."""
+    try:
+        pipeline.main()
+        return True
+    except Exception:
+        return False
+
+
 @st.cache_data
 def load_assets() -> pd.DataFrame:
     with connect() as conn:
         return pd.read_sql_query("SELECT ticker, name, sector, asset_type FROM assets", conn).set_index("ticker")
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def last_price_date() -> date:
     with connect() as conn:
         return date.fromisoformat(conn.execute("SELECT MAX(date) FROM prices").fetchone()[0])
@@ -187,6 +198,7 @@ def text_col(label: str, help_key: str) -> st.column_config.TextColumn:
 # Sidebar – settings
 # ---------------------------------------------------------------------------
 
+data_is_fresh = refresh_market_data()
 assets = load_assets()
 stocks = assets[assets["asset_type"] == "stock"]
 max_date = last_price_date()
@@ -212,7 +224,8 @@ with st.sidebar:
     use_lw = st.checkbox("Use Ledoit-Wolf covariance", value=True,
                          help="A more stable way to estimate how stocks move together. "
                               "Reduces the effect of random noise in the data.")
-    st.caption(f"Prices updated through {max_date:%b %d, %Y}")
+    st.caption(f"Prices updated through {max_date:%b %d, %Y}"
+               + (" · refreshed automatically" if data_is_fresh else " · using stored data"))
     st.caption("🌗 Light / dark mode: ⋮ menu (top right) → Settings → Theme")
 
 st.title("Portfolio Optimizer")
