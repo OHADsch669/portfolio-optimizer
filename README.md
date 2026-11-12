@@ -2,7 +2,6 @@
 
 An end-to-end system that decides **how to split money between stocks** for the best return per unit of risk, and tests which allocation method actually holds up out of sample.
 
-**Live app:** _link added after deployment_
 
 Built with Python, SQL (SQLite), SciPy, scikit-learn and Streamlit, on real daily market data for 30 US stocks across 10 sectors.
 
