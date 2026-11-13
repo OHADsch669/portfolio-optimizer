@@ -29,6 +29,17 @@ def get_last_date(conn: sqlite3.Connection, table: str) -> str | None:
     return row[0]
 
 
+def get_prices_start(conn: sqlite3.Connection) -> str | None:
+    """
+    Earliest "last stored date" across tickers, so that every ticker is brought up to date
+    (a stock added today must not make the others skip the days they are missing).
+    """
+    row = conn.execute(
+        "SELECT MIN(last) FROM (SELECT MAX(date) AS last FROM prices GROUP BY ticker)"
+    ).fetchone()
+    return row[0]
+
+
 def fetch_prices(tickers: list[str], start: str) -> pd.DataFrame:
     """
     Download daily prices for all tickers from `start` until today.
@@ -43,7 +54,7 @@ def fetch_prices(tickers: list[str], start: str) -> pd.DataFrame:
     "Close": "adj_close",
     "Volume": "volume",
 })
-    long["date"] = long["date"] = long["date"].dt.strftime("%Y-%m-%d")
+    long["date"] = long["date"].dt.strftime("%Y-%m-%d")
     long = long.dropna(subset=["adj_close"])
     return long[["ticker", "date", "adj_close", "volume"]]
 
@@ -89,7 +100,7 @@ def main() -> None:
 
         try:
             tickers = get_tickers(conn)
-            start = get_last_date(conn, "prices") or DEFAULT_START
+            start = get_prices_start(conn) or DEFAULT_START
             prices = fetch_prices(tickers, start)
             n_prices = save_prices(conn, prices)
 

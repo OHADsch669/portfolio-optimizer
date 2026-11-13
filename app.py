@@ -15,31 +15,34 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import backtest as bt
 import optimizer as opt
 import pipeline
 import stats
+import theme
+import universe
 
 st.set_page_config(page_title="Portfolio Optimizer", page_icon="📈", layout="wide")
 
 # ---------------------------------------------------------------------------
-# Theme-aware colors (light / dark mode)
+# Colors: one fixed dark-blue theme (see .streamlit/config.toml and src/theme.py)
 # ---------------------------------------------------------------------------
 
-try:
-    IS_DARK = st.context.theme.type == "dark"
-except AttributeError:
-    IS_DARK = False
+theme.register_plotly_template()
+ACCENT, FRONTIER, HIGHLIGHT, MUTED = theme.BLUE, theme.CYAN, theme.GOLD, theme.MUTED
 
-ACCENT = "#60A5FA" if IS_DARK else "#1D4ED8"
-ORANGE = "#FB923C" if IS_DARK else "#C2410C"
-GRAY = "#6B7280" if IS_DARK else "#9CA3AF"
-INK = "#E5E7EB" if IS_DARK else "#111827"
+MIN_STOCKS, MAX_STOCKS = 2, 20
+DEFAULT_PICK = ["AAPL", "MSFT", "JPM", "JNJ", "PG", "XOM", "NEE", "CAT", "HD", "LIN"]
 
 STRATEGIES = {
     "Max Sharpe ratio": "max_sharpe",
     "Minimum variance": "min_variance",
     "Risk parity": "risk_parity",
     "Equal weight (1/N)": "equal_weight",
+}
+BACKTEST_COLORS = {
+    "Equal weight": theme.GREEN, "Min variance": theme.GOLD, "Max Sharpe": theme.BLUE,
+    "Risk parity": "#B18CFF", "SPY (benchmark)": theme.MUTED,
 }
 BACKTEST_NAMES = {
     "equal_weight": "Equal weight", "min_variance": "Min variance", "max_sharpe": "Max Sharpe",
@@ -70,32 +73,10 @@ HELP = {
 }
 
 # ---------------------------------------------------------------------------
-# Look and feel: fade-in on every tab switch, card-style metrics
+# Look and feel: navy background, card-style metrics, fade-in on tab switch
 # ---------------------------------------------------------------------------
 
-st.markdown("""
-<style>
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: none; }
-}
-[role="tabpanel"], [data-baseweb="tab-panel"] { animation: fadeIn 0.45s ease-out; }
-[data-testid="stMetric"] {
-  border: 1px solid rgba(128, 128, 128, 0.25);
-  border-radius: 12px;
-  padding: 14px 18px;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
-}
-[data-testid="stMetric"]:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
-}
-@media (prefers-reduced-motion: reduce) {
-  [role="tabpanel"], [data-baseweb="tab-panel"] { animation: none; }
-  [data-testid="stMetric"], [data-testid="stMetric"]:hover { transition: none; transform: none; }
-}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(theme.CSS, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +145,33 @@ def compute_frontier(mu: np.ndarray, sigma: np.ndarray, cap: float) -> pd.DataFr
     return opt.efficient_frontier(mu, sigma, cap, points=25)
 
 
+@st.cache_data(ttl=24 * 3600, show_spinner="Updating the list of US stocks...")
+def refresh_stock_list() -> bool:
+    """Download the full list of US stocks once a week (checked at most once a day)."""
+    with connect() as conn:
+        return universe.refresh_universe(conn)
+
+
+@st.cache_data
+def load_universe() -> pd.Series:
+    """ticker -> company name, for every stock the user can pick."""
+    with connect() as conn:
+        return universe.load_universe(conn)["name"]
+
+
+@st.cache_data
+def first_dates(tickers: tuple) -> pd.Series:
+    """First date with a price, per ticker."""
+    placeholders = ",".join("?" * len(tickers))
+    with connect() as conn:
+        rows = conn.execute(f"SELECT ticker, MIN(date) FROM prices WHERE ticker IN ({placeholders}) "
+                            f"GROUP BY ticker", tickers).fetchall()
+    return pd.Series({t: date.fromisoformat(d) for t, d in rows})
+
+
 @st.cache_data
 def load_backtests() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The stored study on the original 30 stocks (created by src/backtest.py)."""
     latest_ids = "SELECT MAX(backtest_id) FROM backtests GROUP BY strategy"
     with connect() as conn:
         summary = pd.read_sql_query(f"SELECT * FROM backtests WHERE backtest_id IN ({latest_ids})", conn)
@@ -176,6 +182,70 @@ def load_backtests() -> tuple[pd.DataFrame, pd.DataFrame]:
             conn, parse_dates=["date"],
         )
     return summary, values
+
+
+@st.cache_data(show_spinner=False)
+def run_user_backtest(tickers: tuple, cap: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Walk-forward backtest of the four strategies on the user's own stocks (same rules as backtest.py)."""
+    with connect() as conn:
+        returns = stats.daily_returns(stats.load_prices(conn, list(tickers)))
+        spy = stats.daily_returns(stats.load_prices(conn, [bt.BENCHMARK]))[bt.BENCHMARK]
+        rf = pd.read_sql_query("SELECT date, rate FROM risk_free_rates", conn,
+                               parse_dates=["date"], index_col="date")["rate"]
+    rf_daily = (rf / 100 / stats.TRADING_DAYS).reindex(returns.index).ffill().fillna(0)
+
+    strategies = {
+        "equal_weight": lambda mu, s, r: opt.equal_weight(len(mu)),
+        "min_variance": lambda mu, s, r: opt.min_variance(s, cap),
+        "max_sharpe": lambda mu, s, r: opt.max_sharpe(mu, s, r, cap),
+        "risk_parity": lambda mu, s, r: opt.risk_parity(s),
+    }
+    series = {name: bt.run_backtest(returns, rf_daily, fn)[0] for name, fn in strategies.items()}
+    first_day = next(iter(series.values())).index[0]
+    series["benchmark_spy"] = spy.loc[first_day:returns.index[-1]]
+
+    summary = pd.DataFrame([{"strategy": name, **bt.metrics(r, rf_daily)} for name, r in series.items()])
+    values = pd.concat([pd.DataFrame({"strategy": name, "date": r.index, "portfolio_value": (1 + r).cumprod().values})
+                        for name, r in series.items()])
+    return summary, values
+
+
+def show(fig: go.Figure) -> None:
+    """Draw a chart with the app's own Plotly template (theme=None keeps Streamlit from overriding it)."""
+    st.plotly_chart(fig, width="stretch", theme=None)
+
+
+def render_backtest(summary: pd.DataFrame, values: pd.DataFrame) -> None:
+    values = values.copy()
+    values["Strategy"] = values["strategy"].map(BACKTEST_NAMES)
+    fig = px.line(values, x="date", y="portfolio_value", color="Strategy", title="Growth of $1",
+                  labels={"date": "", "portfolio_value": "Value ($)"}, color_discrete_map=BACKTEST_COLORS)
+    fig.update_traces(selector=dict(name="SPY (benchmark)"), line=dict(dash="dot"))
+    fig.update_layout(height=440, legend=dict(orientation="h", y=-0.15))
+    show(fig)
+
+    table = pd.DataFrame({
+        "Strategy": summary["strategy"].map(BACKTEST_NAMES),
+        "CAGR %": summary["cagr"] * 100,
+        "Volatility %": summary["volatility"] * 100,
+        "Sharpe": summary["sharpe"],
+        "Max drawdown %": summary["max_drawdown"] * 100,
+    }).sort_values("Sharpe", ascending=False)
+    st.caption("Hover over a column title to see what it means.")
+    st.dataframe(table, hide_index=True, width="stretch", column_config={
+        "CAGR %": pct_col("CAGR %", "cagr"),
+        "Volatility %": pct_col("Volatility %", "bt_vol"),
+        "Sharpe": st.column_config.NumberColumn("Sharpe", format="%.2f", help=HELP["sharpe"]),
+        "Max drawdown %": pct_col("Max drawdown %", "max_dd"),
+    })
+
+    dd = values.sort_values("date")
+    dd["Drawdown"] = dd.groupby("Strategy")["portfolio_value"].transform(lambda v: v / v.cummax() - 1)
+    fig = px.line(dd, x="date", y="Drawdown", color="Strategy", title="Drawdown from previous peak",
+                  labels={"date": ""}, color_discrete_map=BACKTEST_COLORS)
+    fig.update_traces(selector=dict(name="SPY (benchmark)"), line=dict(dash="dot"))
+    fig.update_layout(height=340, legend=dict(orientation="h", y=-0.2))
+    show(pct_axis(fig, x=False))
 
 
 def pct_axis(fig: go.Figure, x: bool = True, y: bool = True) -> go.Figure:
@@ -194,22 +264,52 @@ def text_col(label: str, help_key: str) -> st.column_config.TextColumn:
     return st.column_config.TextColumn(label, help=HELP[help_key])
 
 
+def add_new_stocks(new: list[str], names: pd.Series) -> list[str]:
+    """Download and save stocks that are not in the database yet. Returns the ones that failed."""
+    failed = []
+    with st.status(f"Downloading price history for {', '.join(new)}...", expanded=False) as status:
+        with connect() as conn:
+            for t in new:
+                try:
+                    n = universe.add_stock(conn, t, names.get(t, t))
+                    status.write(f"{t}: {n:,} days saved")
+                except Exception:
+                    failed.append(t)
+                    status.write(f"{t}: no data found")
+        status.update(label="Price history saved", state="complete")
+    for cached in (load_assets, load_universe, first_dates, last_price_date):
+        cached.clear()
+    return failed
+
+
 # ---------------------------------------------------------------------------
 # Sidebar – settings
 # ---------------------------------------------------------------------------
 
 data_is_fresh = refresh_market_data()
-assets = load_assets()
-stocks = assets[assets["asset_type"] == "stock"]
+refresh_stock_list()
+names = load_universe()
 max_date = last_price_date()
+failed = st.session_state.setdefault("failed_tickers", set())
 
 with st.sidebar:
     st.header("Settings")
     tickers = st.multiselect(
-        "Stocks", options=list(stocks.index), default=list(stocks.index),
-        format_func=lambda t: f"{t} – {stocks.loc[t, 'name']}",
-        help="The stocks the optimizer may split your money between.",
+        f"Stocks ({MIN_STOCKS}-{MAX_STOCKS})", options=[t for t in names.index if t not in failed],
+        default=[t for t in DEFAULT_PICK if t in names.index], max_selections=MAX_STOCKS,
+        format_func=lambda t: f"{t} · {names.get(t, '')}",
+        placeholder="Type a ticker or company name",
+        help=f"Search any US-listed stock by ticker or name. Pick {MIN_STOCKS} to {MAX_STOCKS} stocks; "
+             "the optimizer splits your money between them. New stocks are downloaded once and saved.",
     )
+
+    assets = load_assets()
+    new = [t for t in tickers if t not in assets.index]
+    if new:
+        failed |= set(add_new_stocks(new, names))
+        assets = load_assets()
+        tickers = [t for t in tickers if t not in failed]
+
     c1, c2 = st.columns(2)
     start = c1.date_input("From", date(2023, 1, 1), min_value=date(2015, 1, 2), max_value=max_date,
                           help="Start of the history used to estimate returns and risk.")
@@ -219,30 +319,41 @@ with st.sidebar:
         help="Max Sharpe: best return for the risk. Minimum variance: lowest risk. "
              "Risk parity: every stock adds the same risk. Equal weight: the same amount in each stock.",
     )
-    cap = st.slider("Max weight per stock", 5, 100, 20, step=5, format="%d%%",
+    min_cap = int(np.ceil(100 / max(len(tickers), 1) / 5) * 5)       # weights must be able to reach 100%
+    min_cap = min(min_cap, 95)
+    cap = st.slider("Max weight per stock", min_cap, 100, max(20, min_cap), step=5, format="%d%%",
                     help="No single stock may get more than this share of the money.") / 100
     use_lw = st.checkbox("Use Ledoit-Wolf covariance", value=True,
                          help="A more stable way to estimate how stocks move together. "
                               "Reduces the effect of random noise in the data.")
     st.caption(f"Prices updated through {max_date:%b %d, %Y}"
                + (" · refreshed automatically" if data_is_fresh else " · using stored data"))
-    st.caption("🌗 Light / dark mode: ⋮ menu (top right) → Settings → Theme")
+
+stocks = assets[assets["asset_type"] == "stock"]
 
 st.title("Portfolio Optimizer")
 
-if len(tickers) < 2:
-    st.warning("Select at least two stocks.")
-    st.stop()
-if cap * len(tickers) < 1:
-    st.error(f"With {len(tickers)} stocks, the max weight must be at least {1 / len(tickers):.0%}.")
+if failed:
+    st.warning(f"No price data found for {', '.join(sorted(failed))}, so it was left out.")
+if len(tickers) < MIN_STOCKS:
+    st.info(f"Pick at least {MIN_STOCKS} stocks in the sidebar to build a portfolio.")
     st.stop()
 if start >= end:
     st.error("The start date must be before the end date.")
     st.stop()
 
+# All stocks are measured over the same period: it starts when the youngest stock has data
+firsts = first_dates(tuple(tickers))
+youngest = firsts.idxmax()
+if firsts[youngest] > start:
+    st.info(f"**{youngest}** only has prices from {firsts[youngest]:%b %d, %Y}, "
+            f"so the whole portfolio is measured from that date.")
+    start = firsts[youngest]
+
 returns = load_returns(tuple(tickers), str(start), str(end))
 if len(returns) < 60:
-    st.warning("Pick a period of at least three months for meaningful estimates.")
+    st.warning("The common period is shorter than three months. Pick an earlier start "
+               "or stocks with a longer history.")
     st.stop()
 
 strategy = STRATEGIES[strategy_label]
@@ -290,24 +401,24 @@ with tab_build:
         try:
             frontier = compute_frontier(mu, sigma, cap)
             fig.add_trace(go.Scatter(x=frontier["volatility"], y=frontier["return"], mode="lines",
-                                     name="Efficient frontier", line=dict(color=INK, width=2)))
+                                     name="Efficient frontier", line=dict(color=FRONTIER, width=3)))
         except RuntimeError:
             st.caption("The efficient frontier could not be computed for these settings.")
         fig.add_trace(go.Scatter(x=stock_vol, y=mu, mode="markers", name="Single stocks", text=tickers,
-                                 marker=dict(color=GRAY, size=8),
+                                 marker=dict(color=MUTED, size=8, opacity=0.8),
                                  hovertemplate="%{text}<br>vol %{x:.1%}<br>return %{y:.1%}<extra></extra>"))
         w_mv = opt.min_variance(sigma, cap)
         fig.add_trace(go.Scatter(x=[opt.portfolio_volatility(w_mv, sigma)], y=[opt.portfolio_return(w_mv, mu)],
                                  mode="markers", name="Min variance",
-                                 marker=dict(color=ORANGE, size=12, symbol="square")))
+                                 marker=dict(color=HIGHLIGHT, size=13, symbol="square")))
         fig.add_trace(go.Scatter(x=[opt.portfolio_volatility(w, sigma)], y=[opt.portfolio_return(w, mu)],
                                  mode="markers", name="Your portfolio",
                                  marker=dict(color=ACCENT, size=16, line=dict(color="white", width=2))))
         fig.update_layout(title="Efficient frontier", xaxis_title="Volatility (annualized)",
                           yaxis_title="Expected return", height=440, legend=dict(orientation="h", y=-0.2))
-        st.plotly_chart(pct_axis(fig), width="stretch")
+        show(pct_axis(fig))
         st.caption("The line shows the best return possible for each level of risk. "
-                   "Grey dots are single stocks: almost all sit below the line, which is why we diversify.")
+                   "Grey-blue dots are single stocks: almost all sit below the line, which is why we diversify.")
 
     with right:
         alloc = weights_by_ticker[weights_by_ticker > 0.001].sort_values()
@@ -315,7 +426,7 @@ with tab_build:
                      labels={"x": "Weight", "y": ""}, color_discrete_sequence=[ACCENT])
         fig.update_traces(hovertemplate="%{y}: %{x:.1%} of your money<extra></extra>")
         fig.update_layout(height=440)
-        st.plotly_chart(pct_axis(fig, y=False), width="stretch")
+        show(pct_axis(fig, y=False))
 
     holdings = pd.DataFrame({
         "Ticker": tickers,
@@ -351,7 +462,7 @@ with tab_explore:
     choice = st.selectbox(
         "Search a stock", options, index=None,
         placeholder="Type a ticker or company name, e.g. Apple or NVDA",
-        format_func=lambda t: f"{t} – {assets.loc[t, 'name']}",
+        format_func=lambda t: f"{t} · {assets.loc[t, 'name']}",
     )
     if choice is None:
         st.info("Pick a stock above to see its price history and key numbers.")
@@ -385,7 +496,7 @@ with tab_explore:
                                                      "which grew more over the same period.")
         fig = go.Figure()
         if compare:
-            for t, color in [(choice, ACCENT), ("SPY", GRAY)]:
+            for t, color in [(choice, ACCENT), ("SPY", MUTED)]:
                 s = view[t].dropna()
                 fig.add_trace(go.Scatter(x=s.index, y=s / s.iloc[0] * 100, mode="lines", name=t,
                                          line=dict(color=color, width=2)))
@@ -393,11 +504,11 @@ with tab_explore:
         else:
             fig.add_trace(go.Scatter(x=price.index, y=price, mode="lines", name=choice, fill="tozeroy",
                                      line=dict(color=ACCENT, width=2),
-                                     fillcolor="rgba(96,165,250,0.15)" if IS_DARK else "rgba(29,78,216,0.08)",
+                                     fillcolor="rgba(59,158,255,0.15)",
                                      hovertemplate="%{x|%b %d, %Y}<br>$%{y:,.2f}<extra></extra>"))
             fig.update_yaxes(range=[price.min() * 0.95, price.max() * 1.03], tickprefix="$")
         fig.update_layout(height=420, legend=dict(orientation="h", y=-0.15), xaxis_title="")
-        st.plotly_chart(fig, width="stretch")
+        show(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -405,43 +516,42 @@ with tab_explore:
 # ---------------------------------------------------------------------------
 
 with tab_bt:
-    summary, values = load_backtests()
-    if summary.empty:
-        st.info("No backtest results yet. Run `python src/backtest.py` once, then refresh.")
+    st.subheader("Walk-forward backtest")
+    st.caption("Simulates running each strategy in real time: every month the weights are re-estimated "
+               f"from the previous {bt.LOOKBACK_DAYS // 252} years only, with {bt.COST_BPS} bps trading costs. "
+               "This shows which strategy would actually have worked, not just which looks best on paper.")
+    source = st.segmented_control("Stocks", ["Your stocks", "Original 30-stock study"], default="Your stocks")
+
+    if source == "Original 30-stock study":
+        summary, values = load_backtests()
+        if summary.empty:
+            st.info("No stored results yet. Run `python src/backtest.py` once, then refresh.")
+        else:
+            row = summary.iloc[0]
+            st.caption(f"{row.start_date} to {row.end_date} · original 30 stocks · "
+                       f"cap {row.max_weight:.0%} per stock.")
+            render_backtest(summary, values)
     else:
-        st.subheader("Walk-forward backtest")
-        row = summary.iloc[0]
-        st.caption(f"{row.start_date} to {row.end_date} · all 30 stocks · monthly rebalance · "
-                   f"{row.lookback_days}-day lookback · {row.transaction_cost_bps:.0f} bps costs · "
-                   f"cap {row.max_weight:.0%}. Weights each month use only data available at that time.")
-
-        values["Strategy"] = values["strategy"].map(BACKTEST_NAMES)
-        fig = px.line(values, x="date", y="portfolio_value", color="Strategy",
-                      title="Growth of $1", labels={"date": "", "portfolio_value": "Value ($)"})
-        fig.update_layout(height=440, legend=dict(orientation="h", y=-0.15))
-        st.plotly_chart(fig, width="stretch")
-
-        table = pd.DataFrame({
-            "Strategy": summary["strategy"].map(BACKTEST_NAMES),
-            "CAGR %": summary["cagr"] * 100,
-            "Volatility %": summary["volatility"] * 100,
-            "Sharpe": summary["sharpe"],
-            "Max drawdown %": summary["max_drawdown"] * 100,
-        }).sort_values("Sharpe", ascending=False)
-        st.caption("Hover over a column title to see what it means.")
-        st.dataframe(table, hide_index=True, width="stretch", column_config={
-            "CAGR %": pct_col("CAGR %", "cagr"),
-            "Volatility %": pct_col("Volatility %", "bt_vol"),
-            "Sharpe": st.column_config.NumberColumn("Sharpe", format="%.2f", help=HELP["sharpe"]),
-            "Max drawdown %": pct_col("Max drawdown %", "max_dd"),
-        })
-
-        dd = values.sort_values("date").copy()
-        dd["Drawdown"] = dd.groupby("Strategy")["portfolio_value"].transform(lambda v: v / v.cummax() - 1)
-        fig = px.line(dd, x="date", y="Drawdown", color="Strategy", title="Drawdown from previous peak",
-                      labels={"date": ""})
-        fig.update_layout(height=340, legend=dict(orientation="h", y=-0.2))
-        st.plotly_chart(pct_axis(fig, x=False), width="stretch")
+        common_years = (max_date - firsts.max()).days / 365.25
+        needed_years = bt.LOOKBACK_DAYS / 252 + 0.5
+        if common_years < needed_years:
+            st.info(f"The backtest needs at least {needed_years:.1f} years of history shared by all your stocks; "
+                    f"yours have {common_years:.1f} (limited by {youngest}). "
+                    "Remove the youngest stock or look at the original 30-stock study.")
+        else:
+            key = (tuple(sorted(tickers)), cap)
+            if st.session_state.get("bt_key") != key:
+                st.caption(f"{len(tickers)} stocks · cap {cap:.0%} per stock · "
+                           f"about {common_years:.0f} years of shared history.")
+                if st.button("Run backtest on my stocks", type="primary"):
+                    st.session_state["bt_key"] = key
+                    st.rerun()
+            else:
+                with st.spinner("Running the backtest (about 20-40 seconds the first time)..."):
+                    summary, values = run_user_backtest(key[0], cap)
+                st.caption(f"{values['date'].min():%b %Y} to {values['date'].max():%b %Y} · "
+                           f"{len(tickers)} stocks · cap {cap:.0%} per stock.")
+                render_backtest(summary, values)
 
 
 # ---------------------------------------------------------------------------
@@ -453,9 +563,10 @@ with tab_risk:
     with left:
         sectors = (pd.Series(w, index=stocks.loc[tickers, "sector"].values)
                    .groupby(level=0).sum().sort_values())
+        sectors = sectors[sectors > 0.001]               # hide sectors with no money in them
         fig = px.bar(x=sectors.values, y=sectors.index, orientation="h", title="Sector exposure",
                      labels={"x": "Weight", "y": ""}, color_discrete_sequence=[ACCENT])
-        st.plotly_chart(pct_axis(fig, y=False), width="stretch")
+        show(pct_axis(fig, y=False))
         st.caption("How your money is spread across parts of the economy.")
     with right:
         comp = pd.DataFrame({"Ticker": tickers, "Weight": w, "Risk contribution": rc})
@@ -463,16 +574,17 @@ with tab_risk:
         comp = comp.melt(id_vars="Ticker", var_name="Measure", value_name="Share")
         fig = px.bar(comp, x="Ticker", y="Share", color="Measure", barmode="group",
                      title="Share of money vs share of risk",
-                     color_discrete_map={"Weight": ACCENT, "Risk contribution": ORANGE})
-        st.plotly_chart(pct_axis(fig, x=False), width="stretch")
-        st.caption("When the orange bar is taller than the blue one, the stock adds more risk "
+                     color_discrete_map={"Weight": ACCENT, "Risk contribution": HIGHLIGHT})
+        show(pct_axis(fig, x=False))
+        st.caption("When the gold bar is taller than the blue one, the stock adds more risk "
                    "than its share of the money.")
 
     corr = returns.corr()
-    fig = px.imshow(corr, color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
-                    title="Correlation of daily returns", aspect="auto")
-    fig.update_layout(height=640)
-    st.plotly_chart(fig, width="stretch")
+    fig = px.imshow(corr, color_continuous_scale=theme.DIVERGING, zmin=-1, zmax=1,
+                    title="Correlation of daily returns", aspect="auto",
+                    text_auto=".2f" if len(tickers) <= 10 else False)
+    fig.update_layout(height=max(380, 30 * len(tickers) + 160))
+    show(fig)
     st.caption("Red: the two stocks tend to move together. Blue: they tend to move apart. "
                "Pairs that don't move together are what make diversification work.")
 
@@ -484,11 +596,13 @@ with tab_risk:
 with tab_method:
     st.markdown("""
 ### What this tool does
-Given a set of stocks, it decides **how to split money between them** for the best return per unit of risk,
+You pick 2 to 20 stocks from any US exchange. The tool decides **how to split money between them** for the best return per unit of risk,
 and tests which allocation method actually works out of sample. It does not predict prices.
 
 ### Pipeline
 1. **Data** – daily adjusted closing prices (yfinance) and the 3-month T-bill rate (FRED), stored in SQLite and updated incrementally.
+   The list of pickable stocks comes from the NASDAQ Trader symbol files; a new stock's full history is downloaded once and saved.
+   All stocks are measured over the same period, starting when the youngest one has data.
 2. **Estimates** – expected returns (annualized historical mean) and the covariance matrix (sample or Ledoit-Wolf shrinkage).
 3. **Optimization** – weights sum to 1, no short selling, optional cap per stock; solved with SLSQP (SciPy).
 4. **Backtest** – walk-forward: every month, weights are re-estimated from the previous two years only, with transaction costs.
@@ -500,7 +614,7 @@ and tests which allocation method actually works out of sample. It does not pred
 - **Equal weight (1/N)** – the naive benchmark that is notoriously hard to beat.
 
 ### Limitations
-- **Survivorship bias:** the stock universe was chosen in 2026 from today's large companies, which flatters past results.
+- **Survivorship bias:** you pick stocks that exist today, so companies that failed along the way are missing, which flatters past results.
 - **Expected returns are noisy:** historical averages are weak forecasts; see how Max Sharpe performs out of sample.
 - Results are for analysis and education only and are **not investment advice**.
 """)

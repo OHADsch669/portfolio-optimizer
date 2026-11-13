@@ -139,3 +139,15 @@ INSERT OR IGNORE INTO assets (ticker, name, sector, asset_type) VALUES
     ('SHW',   'Sherwin-Williams',       'Materials',              'stock'),
     ('NEM',   'Newmont',                'Materials',              'stock'),
     ('SPY',   'SPDR S&P 500 ETF',       'Benchmark',              'benchmark');
+
+-- ============================================================
+-- 6. Stock universe (every US-listed stock the user can pick)
+--    Filled from the NASDAQ Trader symbol files, refreshed weekly.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS ticker_universe (
+    ticker      TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    exchange    TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (date('now'))
+);

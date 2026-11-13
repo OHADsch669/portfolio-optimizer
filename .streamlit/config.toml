@@ -1,5 +1,10 @@
-[theme.light]
-primaryColor = "#1D4ED8"
-
-[theme.dark]
-primaryColor = "#60A5FA"
+# One fixed dark-blue theme (based on the "trading floor" reference image).
+# Every color the app uses is defined here or in theme.py, so there is no light/dark switching.
+[theme]
+base = "dark"
+primaryColor = "#3B9EFF"              # electric blue: buttons, sliders, selected items
+backgroundColor = "#0A1628"           # deep navy page background
+secondaryBackgroundColor = "#122542"  # sidebar, inputs, cards
+textColor = "#E6EEF8"
+borderColor = "#1F3A5F"
+showWidgetBorder = true

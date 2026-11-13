@@ -4,7 +4,7 @@ An end-to-end system that decides **how to split money between stocks** for the 
 
 **Live app:** _link added after deployment_
 
-Built with Python, SQL (SQLite), SciPy, scikit-learn and Streamlit, on real daily market data for 30 US stocks across 10 sectors.
+Built with Python, SQL (SQLite), SciPy, scikit-learn and Streamlit, on real daily market data. The user picks 2 to 20 stocks from any US exchange; new stocks are downloaded once and saved.
 
 ---
 
@@ -28,7 +28,7 @@ This reproduces a well-known result (DeMiguel, Garlappi & Uppal, 2009): optimize
 2. **Statistics engine** – estimates annualized expected returns and the covariance matrix, with optional Ledoit-Wolf shrinkage to reduce estimation noise.
 3. **Optimizer** – solves a constrained quadratic problem (weights sum to 1, no short selling, max weight per stock) with SLSQP for four strategies: Max Sharpe, Minimum variance, Risk parity and Equal weight. Also traces the efficient frontier.
 4. **Walk-forward backtest** – every month, re-estimates weights using only data available at that time, rebalances with transaction costs, and compares against SPY.
-5. **Dashboard** – interactive Streamlit app: portfolio builder with the efficient frontier, stock explorer, backtest results, risk analysis (sector exposure, risk contributions, correlation heatmap), plain-language tooltips and light/dark themes.
+5. **Dashboard** – interactive Streamlit app: portfolio builder with the efficient frontier, stock explorer, backtest results, risk analysis (sector exposure, risk contributions, correlation heatmap), plain-language tooltips, and an on-demand backtest of the user's own stocks.
 
 ## Project structure
 
@@ -43,7 +43,9 @@ portfolio-optimizer/
 │   ├── pipeline.py      # ETL: download, transform, load
 │   ├── stats.py         # returns, covariance, risk-free rate
 │   ├── optimizer.py     # strategies + efficient frontier
-│   └── backtest.py      # walk-forward backtest
+│   ├── backtest.py      # walk-forward backtest
+│   ├── universe.py      # list of US stocks + adding a new stock
+│   └── theme.py         # colors and chart style
 └── requirements.txt
 ```
 
@@ -59,7 +61,7 @@ streamlit run app.py
 
 ## Limitations
 
-- **Survivorship bias:** the 30 stocks were chosen in 2026 from today's large companies. Companies that declined since 2017 are missing, which flatters all strategies relative to SPY.
+- **Survivorship bias:** stocks are picked from companies that exist today (the original study used 30 large companies chosen in 2026). Companies that failed along the way are missing, which flatters all strategies relative to SPY.
 - **Expected returns are noisy:** historical means are weak forecasts, which is exactly what the backtest exposes.
 - **Long-only, no leverage,** daily closing prices only.
 
