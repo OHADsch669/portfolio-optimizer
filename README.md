@@ -2,7 +2,7 @@
 
 An end-to-end system that decides **how to split money between stocks** for the best return per unit of risk, and tests which allocation method actually holds up out of sample.
 
-**Live demo: [ohad-portfolio.streamlit.app](https://ohad-portfolio.streamlit.app)**
+**Live demo: [smart-portfolio-split.streamlit.app](https://smart-portfolio-split.streamlit.app)**
 
 ![Portfolio Optimizer dashboard](docs/screenshot.png)
 
