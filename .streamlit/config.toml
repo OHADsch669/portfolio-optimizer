@@ -1,10 +1,18 @@
-# One fixed dark-blue theme (based on the "trading floor" reference image).
-# Every color the app uses is defined here or in theme.py, so there is no light/dark switching.
+# Black and white theme: black menus with white text, white page and charts.
+# Every color the app uses is defined here or in src/theme.py, so there is no light/dark switching.
 [theme]
-base = "dark"
-primaryColor = "#3B9EFF"              # electric blue: buttons, sliders, selected items
-backgroundColor = "#0A1628"           # deep navy page background
-secondaryBackgroundColor = "#122542"  # sidebar, inputs, cards
-textColor = "#E6EEF8"
-borderColor = "#1F3A5F"
+base = "light"
+primaryColor = "#111111"              # buttons, sliders, selected items, active tab
+backgroundColor = "#FFFFFF"           # page background
+secondaryBackgroundColor = "#F5F6F8"  # inputs and cards on the page
+textColor = "#111111"
+borderColor = "#E3E5E8"
 showWidgetBorder = true
+
+# The sidebar (all the options) is black with white text
+[theme.sidebar]
+backgroundColor = "#0B0B0B"
+secondaryBackgroundColor = "#1C1C1C"
+textColor = "#FFFFFF"
+primaryColor = "#FFFFFF"
+borderColor = "#3A3A3A"
