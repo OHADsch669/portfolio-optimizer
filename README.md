@@ -2,8 +2,11 @@
 
 An end-to-end system that decides **how to split money between stocks** for the best return per unit of risk, and tests which allocation method actually holds up out of sample.
 
+**Live demo: [ohad-portfolio.streamlit.app](https://ohad-portfolio.streamlit.app)**
 
-Built with Python, SQL (SQLite), SciPy, scikit-learn and Streamlit, on real daily market data. The user picks 2 to 20 stocks from any US exchange; new stocks are downloaded once and saved.
+![Portfolio Optimizer dashboard](docs/screenshot.png)
+
+Built with Python, SQL (SQLite), SciPy, scikit-learn and Streamlit, on real daily market data. The user picks 2 to 20 stocks from any US exchange; new stocks are downloaded once and saved. The dashboard is designed so that someone who has never invested can understand every number on the screen.
 
 ---
 
@@ -27,13 +30,29 @@ This reproduces a well-known result (DeMiguel, Garlappi & Uppal, 2009): optimize
 2. **Statistics engine** – estimates annualized expected returns and the covariance matrix, with optional Ledoit-Wolf shrinkage to reduce estimation noise.
 3. **Optimizer** – solves a constrained quadratic problem (weights sum to 1, no short selling, max weight per stock) with SLSQP for four strategies: Max Sharpe, Minimum variance, Risk parity and Equal weight. Also traces the efficient frontier.
 4. **Walk-forward backtest** – every month, re-estimates weights using only data available at that time, rebalances with transaction costs, and compares against SPY.
-5. **Dashboard** – interactive Streamlit app: portfolio builder with the efficient frontier, stock explorer, backtest results, risk analysis (sector exposure, risk contributions, correlation heatmap), plain-language tooltips, and an on-demand backtest of the user's own stocks.
+5. **Dashboard** – interactive Streamlit app: portfolio builder with the efficient frontier, stock explorer, backtest results, risk analysis (sector exposure, risk contributions, correlation heatmap), and an on-demand backtest of the user's own stocks.
+
+## Built for new investors
+
+The main audience is people who are just starting to invest, so the dashboard explains itself:
+
+- **Three-step guide** at the top, and a sidebar that follows the same steps: pick stocks, enter an amount, choose how to split the money. Technical settings stay in a collapsed *Advanced settings* section.
+- **Results in dollars and plain words.** A summary box says where each dollar goes, how much the mix gained, how much it swung and what the worst drop would have been.
+- **Comparison with the S&P 500** under every metric (green = better than the index), plus a chart of what the money would have become next to the same money in the S&P 500.
+- **All four strategies side by side** on the user's own stocks, with a short explanation of how they differ.
+- **No silent surprises.** When a strategy gives a stock 0%, a message explains why (for example, it lost money in the period), and the stock still appears in the table.
+- **Help where it's needed.** Metrics, table columns and the axes of the main charts have hover explanations, and a glossary covers the terms.
+- **Honest framing.** In-sample numbers are labeled as hindsight, and the walk-forward backtest is presented as the fair test.
+
+Design: a black-and-white theme with black menus, a live price strip with daily changes, charts that animate when they update, and a full-screen view with zoom and pan tools.
 
 ## Project structure
 
 ```
 portfolio-optimizer/
 ├── app.py               # Streamlit dashboard
+├── .streamlit/
+│   └── config.toml      # theme: colors of the page and the sidebar
 ├── data/
 │   ├── schema.sql       # database schema + stock universe
 │   └── portfolio.db     # SQLite database (snapshot)

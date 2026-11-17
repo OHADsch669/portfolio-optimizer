@@ -70,7 +70,8 @@ HELP = {
     "risk_contrib": "How much of the whole portfolio's ups and downs come from this stock. "
                     "All rows add up to 100%.",
     "port_return": "The average yearly gain this portfolio would have had in the period you picked.",
-    "port_vol": "How much the portfolio's value swings in a typical year. Lower means a smoother ride.",
+    "port_vol": "Volatility: how much the portfolio's value swings in a typical year. "
+                "Lower means a smoother ride.",
     "sharpe": "Return earned for each unit of risk, above what a risk-free government bill pays. "
               "Above 1 is very good.",
     "max_dd": "The biggest drop from a peak to a low: the worst loss you would have felt along the way.",
@@ -587,7 +588,7 @@ with tab_build:
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Yearly return", f"{port_ret:.1%}", vs_spy(port_ret - spy_ret),
               help=HELP["port_return"] + HELP["vs_spy"])
-    k2.metric("Ups & downs (volatility)", f"{port_vol:.1%}", vs_spy(port_vol - spy_vol), delta_color="inverse",
+    k2.metric("Ups & downs", f"{port_vol:.1%}", vs_spy(port_vol - spy_vol), delta_color="inverse",
               help=HELP["port_vol"] + HELP["vs_spy"] + " Here lower is better, so less than the S&P 500 is green.")
     k3.metric("Sharpe ratio", f"{port_sharpe:.2f}", vs_spy(port_sharpe - spy_sharpe, pct=False),
               help=HELP["sharpe"] + HELP["vs_spy"])
